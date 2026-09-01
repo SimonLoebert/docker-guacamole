@@ -83,6 +83,16 @@ ARG RUNTIME_DEPENDENCIES="  \
     bash                    \
     tini"
 
+### Fail the build if a Guacamole release moves these paths again, rather than
+### producing an image that only breaks at runtime. 1.6.0 moved every one of
+### them: extensions/ and drivers/ are new, and the WAR came from the root of
+### PREFIX_DIR. Note that the symlink to the WAR below would happily dangle.
+RUN test -f ${PREFIX_DIR}/webapp/guacamole.war                                  && \
+    test -d ${PREFIX_DIR}/extensions/guacamole-auth-jdbc/mysql/schema/upgrade   && \
+    test -f ${PREFIX_DIR}/drivers/mysql-jdbc.jar                                && \
+    test -f ${PREFIX_DIR}/DEPENDENCIES                                          && \
+    test -f ${PREFIX_DIR}/sbin/guacd
+
 COPY image /
 
 ### Install packages and clean up in one command to reduce build size
