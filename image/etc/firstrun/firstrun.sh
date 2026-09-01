@@ -1,9 +1,80 @@
 #!/bin/bash
 
+### Source layout of the official guacamole/guacamole image (1.6.0 and later):
+###   /opt/guacamole/webapp/guacamole.war   the web application itself
+###   /opt/guacamole/extensions/...         one directory per extension
+###   /opt/guacamole/drivers/...            JDBC drivers
 EXT_STORE="/opt/guacamole"
-GUAC_EXT="/config/guacamole/extensions"
+EXT_SRC="$EXT_STORE/extensions"
+DRIVER_SRC="$EXT_STORE/drivers"
+
+GUAC_HOME="${GUACAMOLE_HOME:-/config/guacamole}"
+GUAC_EXT="$GUAC_HOME/extensions"
+GUAC_LIB="$GUAC_HOME/lib"
 TOMCAT_LOG="/config/log/tomcat"
-CHANGES=false
+
+### Returns success if the named OPT_* variable is set to Y.
+enabled() {
+  local value="${!1:-N}"
+  [ "${value^^}" = "Y" ]
+}
+
+### Returns success if at least one file matches the glob.
+exists() {
+  compgen -G "$1" > /dev/null
+}
+
+### install_extension <label> <glob> <source jar> [destination prefix]
+###
+### Installs (or replaces, when the shipped jar differs from the installed one)
+### a single extension jar in $GUAC_EXT. The glob is matched against the
+### installed jars so that renamed jars from older Guacamole releases are
+### cleaned up rather than left behind next to the new one.
+install_extension() {
+  local label="$1" glob="$2" src="$3" prefix="${4:-}"
+  local dest="$GUAC_EXT/${prefix}$(basename "$src")"
+
+  if [ ! -f "$src" ]; then
+    echo "Warning: $label extension is not shipped with this image, skipping."
+    return
+  fi
+
+  if [ -f "$dest" ] && diff -q "$dest" "$src" > /dev/null 2>&1; then
+    echo "Using existing $label extension."
+    return
+  fi
+
+  if exists "$GUAC_EXT/$glob"; then
+    echo "Upgrading $label extension."
+    rm -f "$GUAC_EXT"/$glob
+  else
+    echo "Copying $label extension."
+  fi
+
+  cp "$src" "$dest"
+}
+
+### remove_extension <label> <glob>
+remove_extension() {
+  local label="$1" glob="$2"
+
+  if exists "$GUAC_EXT/$glob"; then
+    echo "Removing $label extension."
+    rm -f "$GUAC_EXT"/$glob
+  fi
+}
+
+### sync_schema <source directory> <destination directory>
+###
+### Copies the SQL/LDIF files an administrator needs to initialise an external
+### database or directory. Always refreshed so they match the installed jars.
+sync_schema() {
+  local src="$1" dest="$2"
+
+  [ -d "$src" ] || return
+  mkdir -p "$dest"
+  cp -R "$src"/. "$dest"/
+}
 
 # Create user
 PUID=${PUID:-99}
@@ -20,333 +91,183 @@ echo "----------------------"
 chown -R abc:abc /config
 chown -R abc:abc /opt/tomcat /var/run/tomcat /var/lib/tomcat
 
-# Check if logback.xml exists and set the log level based on LOGBACK_LEVEL value
-if [ ! -f "$GUACAMOLE_HOME"/logback.xml ]; then
-  unzip -o -j /opt/guacamole/guacamole.war WEB-INF/classes/logback.xml -d "$GUACAMOLE_HOME" > /dev/null
-fi
-sed -i 's/ level="[^"]*"/ level="'$LOGBACK_LEVEL'"/' "$GUACAMOLE_HOME"/logback.xml
-
-OPTMYSQL=${OPT_MYSQL:-N}
+mkdir -p "$GUAC_EXT" "$GUAC_LIB" "$TOMCAT_LOG"
 
 # Check if properties file exists. If not, copy in the starter database
-if [ -f /config/guacamole/guacamole.properties ]; then
+if [ -f "$GUAC_HOME"/guacamole.properties ]; then
   echo "Using existing properties file."
-  if [ ! -d "$TOMCAT_LOG" ]; then
-    echo "Creating log directory."
-    mkdir -p "$TOMCAT_LOG"
-    chown -R abc:abc "$TOMCAT_LOG"
-  fi
 else
   echo "Creating properties from template."
-  mkdir -p "$GUAC_EXT" /config/guacamole/lib "$TOMCAT_LOG"
-  cp /etc/firstrun/templates/* /config/guacamole
-  chown -R abc:abc /config/guacamole "$TOMCAT_LOG"
-  if [ "$OPTMYSQL" = "Y" ] && [ -f /etc/firstrun/mariadb.sh ]; then
+  cp /etc/firstrun/templates/* "$GUAC_HOME"
+  if enabled OPT_MYSQL && [ -f /etc/firstrun/mariadb.sh ]; then
     echo "Creating Database folders"
     mkdir -p /config/databases
     chown abc:abc /config/databases
   fi
   PW=$(pwgen -1snc 32)
-  sed -i -e 's/some_password/'$PW'/g' /config/guacamole/guacamole.properties
-  CHANGES=true
+  sed -i -e 's/some_password/'"$PW"'/g' "$GUAC_HOME"/guacamole.properties
 fi
 
-# Check if extensions files exists. Copy or upgrade if necessary.
-OPTMYSQLEXT=${OPT_MYSQL_EXTENSION:-N}
-if [ "$OPTMYSQL" = "Y" ] || [ "$OPTMYSQLEXT" = "Y" ]; then
-  if [ -f "$GUAC_EXT"/*jdbc-mysql*.jar ]; then
-    oldMysqlFiles=( "$GUAC_EXT"/*jdbc-mysql*.jar )
-    newMysqlFiles=( "$EXT_STORE"/mysql/*jdbc-mysql*.jar )
-
-    if diff ${oldMysqlFiles[0]} ${newMysqlFiles[0]} >/dev/null ; then
-      echo "Using existing MySQL extension."
-      if [ ! -d /config/mysql-schema ]; then
-        mkdir /config/mysql-schema
-        cp -R /root/mysql/* /config/mysql-schema
-        CHANGES=true
-      fi
-    else
-      echo "Upgrading MySQL extension."
-      rm "$GUAC_EXT"/*jdbc-mysql*.jar
-      cd /config/guacamole/lib
-      rm mysql-connector*.jar
-      cp "$EXT_STORE"/mysql/*jdbc-mysql*.jar "$GUAC_EXT"
-      cp "$EXT_STORE"/mysql/mysql-connector* /config/guacamole/lib
-      rm -R /config/mysql-schema/*
-      cp -R "$EXT_STORE"/mysql/schema/* /config/mysql-schema
-      CHANGES=true
-    fi
-  else
-    echo "Copying MySQL extension."
-    cp "$EXT_STORE"/mysql/*jdbc-mysql*.jar "$GUAC_EXT"
-    cp "$EXT_STORE"/mysql/mysql-connector* /config/guacamole/lib
-    mkdir /config/mysql-schema
-    cp -R "$EXT_STORE"/mysql/schema/* /config/mysql-schema
-    CHANGES=true
-  fi
-elif [ "$OPTMYSQL" = "N" ] || [ "$OPTMYSQLEXT" = "N" ]; then
-  if [ -f "$GUAC_EXT"/*jdbc-mysql*.jar ]; then
-    echo "Removing MySQL extension."
-    rm "$GUAC_EXT"/*jdbc-mysql*.jar
-    cd /config/guacamole/lib
-    rm mysql-connector*.jar
-    rm -R /config/mysql-schema
-  fi
+# Check if logback.xml exists and set the log level based on LOGBACK_LEVEL value
+if [ ! -f "$GUAC_HOME"/logback.xml ]; then
+  unzip -o -j "$EXT_STORE"/webapp/guacamole.war WEB-INF/classes/logback.xml -d "$GUAC_HOME" > /dev/null
 fi
+sed -i 's/ level="[^"]*"/ level="'"$LOGBACK_LEVEL"'"/' "$GUAC_HOME"/logback.xml
 
-OPTSQLSERVER=${OPT_SQLSERVER:-N}
-if [ "$OPTSQLSERVER" = "Y" ]; then
-  if [ -f "$GUAC_EXT"/*sqlserver*.jar ]; then
-    oldSqlServerFiles=( "$GUAC_EXT"/*sqlserver*.jar )
-    newSqlServerFiles=( "$EXT_STORE"/sqlserver/*sqlserver*.jar )
-
-    if diff ${oldSqlServerFiles[0]} ${newSqlServerFiles[0]} >/dev/null ; then
-    	echo "Using existing SQL Server extension."
-    else
-    	echo "Upgrading SQL Server extension."
-    	rm "$GUAC_EXT"/*sqlserver*.jar
-    	cp "$EXT_STORE"/sqlserver/*sqlserver*.jar "$GUAC_EXT"
-      rm -R /config/sqlserver-schema/*
-      cp -R "$EXT_STORE"/sqlserver/schema/* /config/sqlserver-schema
-      CHANGES=true
-    fi
-  else
-    echo "Copying SQL Server extension."
-    cp "$EXT_STORE"/sqlserver/*sqlserver*.jar "$GUAC_EXT"
-    mkdir /config/sqlserver-schema
-    cp -R "$EXT_STORE"/sqlserver/schema/* /config/sqlserver-schema
-    CHANGES=true
-  fi
-elif [ "$OPTSQLSERVER" = "N" ]; then
-  if [ -f "$GUAC_EXT"/*sqlserver*.jar ]; then
-    echo "Removing SQL Server extension."
-    rm "$GUAC_EXT"/*sqlserver*.jar
-    rm -R /config/sqlserver-schema
-  fi
-fi
-
-OPTLDAP=${OPT_LDAP:-N}
-if [ "$OPTLDAP" = "Y" ]; then
-  if [ -f "$GUAC_EXT"/*ldap*.jar ]; then
-    oldLDAPFiles=( "$GUAC_EXT"/*ldap*.jar )
-    newLDAPFiles=( "$EXT_STORE"/ldap/*ldap*.jar )
-
-    if diff ${oldLDAPFiles[0]} ${newLDAPFiles[0]} >/dev/null ; then
-    	echo "Using existing LDAP extension."
-    else
-    	echo "Upgrading LDAP extension."
-    	rm "$GUAC_EXT"/*ldap*.jar
-    	rm -R /config/ldap-schema/*
-    	cp "$EXT_STORE"/ldap/*ldap*.jar "$GUAC_EXT"
-    	cp -R "$EXT_STORE"/ldap/*.ldif /config/ldap-schema
-      CHANGES=true
-    fi
-  else
-    echo "Copying LDAP extension."
-    cp "$EXT_STORE"/ldap/*ldap*.jar "$GUAC_EXT"
-    mkdir /config/ldap-schema
-    cp -R "$EXT_STORE"/ldap/*.ldif /config/ldap-schema
-    CHANGES=true
-  fi
-elif [ "$OPTLDAP" = "N" ]; then
-  if [ -f "$GUAC_EXT"/*ldap*.jar ]; then
-    echo "Removing LDAP extension."
-    rm "$GUAC_EXT"/*ldap*.jar
-    rm -R /config/ldap-schema
-  fi
-fi
-
-OPTDUO=${OPT_DUO:-N}
-if [ "$OPTDUO" = "Y" ]; then
-  if [ -f "$GUAC_EXT"/*duo*.jar ]; then
-    oldDuoFiles=( "$GUAC_EXT"/*duo*.jar )
-    newDuoFiles=( "$EXT_STORE"/duo/*duo*.jar )
-
-    if diff ${oldDuoFiles[0]} ${newDuoFiles[0]} >/dev/null ; then
-      echo "Using existing Duo extension."
-    else
-      echo "Upgrading Duo extension."
-      rm "$GUAC_EXT"/*duo*.jar
-      cp "$EXT_STORE"/duo/*duo*.jar "$GUAC_EXT"
-      CHANGES=true
-    fi
-  else
-    echo "Copying Duo extension."
-    cp "$EXT_STORE"/duo/*duo*.jar "$GUAC_EXT"
-    CHANGES=true
-  fi
-elif [ "$OPTDUO" = "N" ]; then
-  if [ -f "$GUAC_EXT"/*duo*.jar ]; then
-    echo "Removing Duo extension."
-    rm "$GUAC_EXT"/*duo*.jar
-  fi
-fi
-
-OPTCAS=${OPT_CAS:-N}
-if [ "$OPTCAS" = "Y" ]; then
-  if [ -f "$GUAC_EXT"/*cas*.jar ]; then
-    oldCasFiles=( "$GUAC_EXT"/*cas*.jar )
-    newCasFiles=( "$EXT_STORE"/cas/*cas*.jar )
-
-    if diff ${oldCasFiles[0]} ${newCasFiles[0]} >/dev/null ; then
-      echo "Using existing CAS extension."
-    else
-      echo "Upgrading CAS extension."
-      rm "$GUAC_EXT"/*cas*.jar
-      cp "$EXT_STORE"/cas/*cas*.jar "$GUAC_EXT"
-      CHANGES=true
-    fi
-  else
-    echo "Copying CAS extension."
-    cp "$EXT_STORE"/cas/*cas*.jar "$GUAC_EXT"
-    CHANGES=true
-  fi
-elif [ "$OPTCAS" = "N" ]; then
-  if [ -f "$GUAC_EXT"/*cas*.jar ]; then
-    echo "Removing CAS extension."
-    rm "$GUAC_EXT"/*cas*.jar
-  fi
-fi
-
-OPTOPENID=${OPT_OPENID:-N}
-if [ "$OPTOPENID" = "Y" ]; then
-  if [ -f "$GUAC_EXT"/*openid*.jar ]; then
-    oldOpenidFiles=( "$GUAC_EXT"/*openid*.jar )
-    newOpenidFiles=( "$EXT_STORE"/openid/*openid*.jar )
-
-    if diff ${oldOpenidFiles[0]} ${newOpenidFiles[0]} >/dev/null ; then
-      echo "Using existing OpenID extension."
-    else
-      echo "Upgrading OpenID extension."
-      rm "$GUAC_EXT"/*openid*.jar
-      find ${EXT_STORE}/openid/ -name "*.jar" | awk -F/ '{print $NF}' | xargs -I '{}' cp "${EXT_STORE}/openid/{}" "${GUAC_EXT}/1-{}"
-      CHANGES=true
-    fi
-  else
-    echo "Copying OpenID extension."
-    find ${EXT_STORE}/openid/ -name "*.jar" | awk -F/ '{print $NF}' | xargs -I '{}' cp "${EXT_STORE}/openid/{}" "${GUAC_EXT}/1-{}"
-    CHANGES=true
-  fi
-elif [ "$OPTOPENID" = "N" ]; then
-  if [ -f "$GUAC_EXT"/*openid*.jar ]; then
-    echo "Removing OpenID extension."
-    rm "$GUAC_EXT"/*openid*.jar
-  fi
-fi
-
-OPTTOTP=${OPT_TOTP:-N}
-if [ "$OPTTOTP" = "Y" ]; then
-  if [ -f "$GUAC_EXT"/*totp*.jar ]; then
-    oldTotpFiles=( "$GUAC_EXT"/*totp*.jar )
-    newTotpFiles=( "$EXT_STORE"/totp/*totp*.jar )
-
-    if diff ${oldTotpFiles[0]} ${newTotpFiles[0]} >/dev/null ; then
-      echo "Using existing TOTP extension."
-    else
-      echo "Upgrading TOTP extension."
-      rm "$GUAC_EXT"/*totp*.jar
-      cp "$EXT_STORE"/totp/*totp*.jar "$GUAC_EXT"
-      CHANGES=true
-    fi
-  else
-    echo "Copying TOTP extension."
-    cp "$EXT_STORE"/totp/*totp*.jar "$GUAC_EXT"
-    CHANGES=true
-  fi
-elif [ "$OPTTOTP" = "N" ]; then
-  if [ -f "$GUAC_EXT"/*totp*.jar ]; then
-    echo "Removing TOTP extension."
-    rm "$GUAC_EXT"/*totp*.jar
-  fi
-fi
-
-OPTQUICKCONNECT=${OPT_QUICKCONNECT:-N}
-if [ "$OPTQUICKCONNECT" = "Y" ]; then
-  if [ -f "$GUAC_EXT"/*quickconnect*.jar ]; then
-    oldQCFiles=( "$GUAC_EXT"/*quickconnect*.jar )
-    newQCFiles=( "$EXT_STORE"/quickconnect/*quickconnect*.jar )
-
-    if diff ${oldQCFiles[0]} ${newQCFiles[0]} >/dev/null ; then
-      echo "Using existing Quick Connect extension."
-    else
-      echo "Upgrading Quick Connect extension."
-      rm "$GUAC_EXT"/*quickconnect*.jar
-      cp "$EXT_STORE"/quickconnect/*quickconnect*.jar "$GUAC_EXT"
-      CHANGES=true
-    fi
-  else
-    echo "Copying Quick Connect extension."
-    cp "$EXT_STORE"/quickconnect/*quickconnect*.jar "$GUAC_EXT"
-    CHANGES=true
-  fi
-elif [ "$OPTQUICKCONNECT" = "N" ]; then
-  if [ -f "$GUAC_EXT"/*quickconnect*.jar ]; then
-    echo "Removing Quick Connect extension."
-    rm "$GUAC_EXT"/*quickconnect*.jar
-  fi
-fi
-
-OPTHEADER=${OPT_HEADER:-N}
-if [ "$OPTHEADER" = "Y" ]; then
-  if [ -f "$GUAC_EXT"/*header*.jar ]; then
-    oldQCFiles=( "$GUAC_EXT"/*header*.jar )
-    newQCFiles=( "$EXT_STORE"/header/*header*.jar )
-
-    if diff ${oldQCFiles[0]} ${newQCFiles[0]} >/dev/null ; then
-      echo "Using existing Header extension."
-    else
-      echo "Upgrading Header extension."
-      rm "$GUAC_EXT"/*header*.jar
-      cp "$EXT_STORE"/header/*header*.jar "$GUAC_EXT"
-      CHANGES=true
-    fi
-  else
-    echo "Copying Header extension."
-    cp "$EXT_STORE"/header/*header*.jar "$GUAC_EXT"
-    CHANGES=true
-  fi
-elif [ "$OPTHEADER" = "N" ]; then
-  if [ -f "$GUAC_EXT"/*header*.jar ]; then
-    echo "Removing Header extension."
-    rm "$GUAC_EXT"/*header*.jar
-  fi
-fi
-
-OPTSAML=${OPT_SAML:-N}
-if [ "$OPTSAML" = "Y" ]; then
-  if [ -f "$GUAC_EXT"/*saml*.jar ]; then
-    oldQCFiles=( "$GUAC_EXT"/*saml*.jar )
-    newQCFiles=( "$EXT_STORE"/saml/*saml*.jar )
-
-    if diff ${oldQCFiles[0]} ${newQCFiles[0]} >/dev/null ; then
-      echo "Using existing SAML extension."
-    else
-      echo "Upgrading SAML extension."
-      rm "$GUAC_EXT"/*saml*.jar
-      cp "$EXT_STORE"/saml/*saml*.jar "$GUAC_EXT"
-      CHANGES=true
-    fi
-  else
-    echo "Copying SAML extension."
-    cp "$EXT_STORE"/saml/*saml*.jar "$GUAC_EXT"
-    CHANGES=true
-  fi
-elif [ "$OPTSAML" = "N" ]; then
-  if [ -f "$GUAC_EXT"/*saml*.jar ]; then
-    echo "Removing SAML extension."
-    rm "$GUAC_EXT"/*saml*.jar
-  fi
-fi
-
-if [ "$CHANGES" = true ]; then
-  echo "Updating user permissions."
-  chown abc:abc -R /config/guacamole
-  chmod 755 -R /config/guacamole
+### MySQL
+### OPT_MYSQL enables the embedded MariaDB, OPT_MYSQL_EXTENSION only installs
+### the extension so that an external MySQL/MariaDB server can be used.
+if enabled OPT_MYSQL || enabled OPT_MYSQL_EXTENSION; then
+  install_extension "MySQL" '*jdbc-mysql*.jar' "$EXT_SRC/guacamole-auth-jdbc/mysql/guacamole-auth-jdbc-mysql.jar"
+  sync_schema "$EXT_SRC/guacamole-auth-jdbc/mysql/schema" /config/mysql-schema
+  # The driver was renamed from mysql-connector-*.jar to mysql-jdbc.jar in 1.6.0
+  rm -f "$GUAC_LIB"/mysql-connector*.jar
+  cp -f "$DRIVER_SRC"/mysql-jdbc.jar "$GUAC_LIB"
 else
-  echo "No permissions changes needed."
+  remove_extension "MySQL" '*jdbc-mysql*.jar'
+  rm -f "$GUAC_LIB"/mysql-connector*.jar "$GUAC_LIB"/mysql-jdbc.jar
+  rm -rf /config/mysql-schema
 fi
 
-if [ "$OPTMYSQL" = "Y" ] && [ -f /etc/firstrun/mariadb.sh ]; then
+### SQL Server
+if enabled OPT_SQLSERVER; then
+  install_extension "SQL Server" '*jdbc-sqlserver*.jar' "$EXT_SRC/guacamole-auth-jdbc/sqlserver/guacamole-auth-jdbc-sqlserver.jar"
+  sync_schema "$EXT_SRC/guacamole-auth-jdbc/sqlserver/schema" /config/sqlserver-schema
+  cp -f "$DRIVER_SRC"/mssql-jdbc.jar "$GUAC_LIB"
+else
+  remove_extension "SQL Server" '*jdbc-sqlserver*.jar'
+  rm -f "$GUAC_LIB"/mssql-jdbc.jar
+  rm -rf /config/sqlserver-schema
+fi
+
+### PostgreSQL
+if enabled OPT_POSTGRES; then
+  install_extension "PostgreSQL" '*jdbc-postgresql*.jar' "$EXT_SRC/guacamole-auth-jdbc/postgresql/guacamole-auth-jdbc-postgresql.jar"
+  sync_schema "$EXT_SRC/guacamole-auth-jdbc/postgresql/schema" /config/postgresql-schema
+  cp -f "$DRIVER_SRC"/postgresql-jdbc.jar "$GUAC_LIB"
+else
+  remove_extension "PostgreSQL" '*jdbc-postgresql*.jar'
+  rm -f "$GUAC_LIB"/postgresql-jdbc.jar
+  rm -rf /config/postgresql-schema
+fi
+
+### LDAP
+if enabled OPT_LDAP; then
+  install_extension "LDAP" '*ldap*.jar' "$EXT_SRC/guacamole-auth-ldap/guacamole-auth-ldap.jar"
+  sync_schema "$EXT_SRC/guacamole-auth-ldap/schema" /config/ldap-schema
+else
+  remove_extension "LDAP" '*ldap*.jar'
+  rm -rf /config/ldap-schema
+fi
+
+### Duo two-factor authentication
+if enabled OPT_DUO; then
+  install_extension "Duo" '*duo*.jar' "$EXT_SRC/guacamole-auth-duo/guacamole-auth-duo.jar"
+else
+  remove_extension "Duo" '*duo*.jar'
+fi
+
+### CAS single sign-on
+if enabled OPT_CAS; then
+  install_extension "CAS" '*cas*.jar' "$EXT_SRC/guacamole-auth-sso/cas/guacamole-auth-sso-cas.jar"
+else
+  remove_extension "CAS" '*cas*.jar'
+fi
+
+### OpenID Connect single sign-on
+### Guacamole loads extensions in alphabetical order and the OpenID extension
+### has to come first for redirect-based login to work, hence the "1-" prefix.
+if enabled OPT_OPENID; then
+  install_extension "OpenID" '*openid*.jar' "$EXT_SRC/guacamole-auth-sso/openid/guacamole-auth-sso-openid.jar" "1-"
+else
+  remove_extension "OpenID" '*openid*.jar'
+fi
+
+### SAML single sign-on
+if enabled OPT_SAML; then
+  install_extension "SAML" '*saml*.jar' "$EXT_SRC/guacamole-auth-sso/saml/guacamole-auth-sso-saml.jar"
+else
+  remove_extension "SAML" '*saml*.jar'
+fi
+
+### SSL/TLS client certificate authentication
+if enabled OPT_SSL; then
+  install_extension "SSL" '*sso-ssl*.jar' "$EXT_SRC/guacamole-auth-sso/ssl/guacamole-auth-sso-ssl.jar"
+else
+  remove_extension "SSL" '*sso-ssl*.jar'
+fi
+
+### TOTP two-factor authentication
+if enabled OPT_TOTP; then
+  install_extension "TOTP" '*totp*.jar' "$EXT_SRC/guacamole-auth-totp/guacamole-auth-totp.jar"
+else
+  remove_extension "TOTP" '*totp*.jar'
+fi
+
+### Quick Connect
+if enabled OPT_QUICKCONNECT; then
+  install_extension "Quick Connect" '*quickconnect*.jar' "$EXT_SRC/guacamole-auth-quickconnect/guacamole-auth-quickconnect.jar"
+else
+  remove_extension "Quick Connect" '*quickconnect*.jar'
+fi
+
+### HTTP header authentication
+if enabled OPT_HEADER; then
+  install_extension "Header" '*header*.jar' "$EXT_SRC/guacamole-auth-header/guacamole-auth-header.jar"
+else
+  remove_extension "Header" '*header*.jar'
+fi
+
+### JSON authentication
+if enabled OPT_JSON; then
+  install_extension "JSON" '*auth-json*.jar' "$EXT_SRC/guacamole-auth-json/guacamole-auth-json.jar"
+else
+  remove_extension "JSON" '*auth-json*.jar'
+fi
+
+### Brute-force protection (new in 1.6.0)
+if enabled OPT_BAN; then
+  install_extension "Brute-force ban" '*auth-ban*.jar' "$EXT_SRC/guacamole-auth-ban/guacamole-auth-ban.jar"
+else
+  remove_extension "Brute-force ban" '*auth-ban*.jar'
+fi
+
+### Additional login restrictions (new in 1.6.0)
+if enabled OPT_RESTRICT; then
+  install_extension "Login restriction" '*auth-restrict*.jar' "$EXT_SRC/guacamole-auth-restrict/guacamole-auth-restrict.jar"
+else
+  remove_extension "Login restriction" '*auth-restrict*.jar'
+fi
+
+### Session recording storage
+if enabled OPT_HISTORY_RECORDING_STORAGE; then
+  install_extension "History recording storage" '*history-recording-storage*.jar' "$EXT_SRC/guacamole-history-recording-storage/guacamole-history-recording-storage.jar"
+else
+  remove_extension "History recording storage" '*history-recording-storage*.jar'
+fi
+
+### On-screen connection statistics
+if enabled OPT_DISPLAY_STATISTICS; then
+  install_extension "Display statistics" '*display-statistics*.jar' "$EXT_SRC/guacamole-display-statistics/guacamole-display-statistics.jar"
+else
+  remove_extension "Display statistics" '*display-statistics*.jar'
+fi
+
+### Keeper Secrets Manager vault
+if enabled OPT_VAULT_KSM; then
+  install_extension "Keeper Secrets Manager" '*vault-ksm*.jar' "$EXT_SRC/guacamole-vault/ksm/guacamole-vault-ksm.jar"
+else
+  remove_extension "Keeper Secrets Manager" '*vault-ksm*.jar'
+fi
+
+echo "Updating user permissions."
+chown -R abc:abc "$GUAC_HOME" "$TOMCAT_LOG"
+chmod -R 755 "$GUAC_HOME"
+for schema in /config/mysql-schema /config/sqlserver-schema /config/postgresql-schema /config/ldap-schema; do
+  [ -d "$schema" ] && chown -R abc:abc "$schema"
+done
+
+if enabled OPT_MYSQL && [ -f /etc/firstrun/mariadb.sh ]; then
   /etc/firstrun/mariadb.sh
   exec /sbin/tini -s -- /usr/bin/supervisord -n -c /etc/supervisor/conf.d/supervisord-mariadb.conf
 else
