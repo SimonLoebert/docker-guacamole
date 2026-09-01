@@ -64,6 +64,9 @@ jobs:
           images=("ghcr.io/${GITHUB_REPOSITORY,,}")
           if [ -n "$DOCKERHUB_USERNAME" ]; then
             images+=("docker.io/${DOCKERHUB_REPOSITORY:-$DOCKERHUB_USERNAME/guacamole}")
+            echo 'dockerhub=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'dockerhub=false' >> "$GITHUB_OUTPUT"
           fi
 
           {
@@ -102,7 +105,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to Docker Hub
-        if: steps.meta.outputs.push == 'true' && secrets.DOCKERHUB_USERNAME != ''
+        if: steps.meta.outputs.push == 'true' && steps.meta.outputs.dockerhub == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -118,7 +121,6 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.created=${{ github.event.repository.updated_at }}
           cache-from: type=gha,scope=${{ matrix.variant }}
           cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
 
