@@ -1,9 +1,11 @@
 #!/bin/bash
+### Local build helper. Publishing is handled by .github/workflows/docker.yml.
+###
+### Usage: ./build.sh [repository] [version]
+set -euo pipefail
 
-REPOSITORY="$1"
+REPOSITORY="${1:-local}"
+VERSION="${2:-$(awk -F= '/^ARG GUAC_VER=/{print $2; exit}' Dockerfile)}"
 
-VERSION="$2"
-
-docker build --rm --target nomariadb -t "$REPOSITORY"/guacamole:"$VERSION"-nomariadb .
-
-docker build --rm -t "$REPOSITORY"/guacamole:"$VERSION" .
+docker build --rm --target nomariadb -t "${REPOSITORY}/guacamole:${VERSION}-nomariadb" .
+docker build --rm --target mariadb   -t "${REPOSITORY}/guacamole:${VERSION}" .

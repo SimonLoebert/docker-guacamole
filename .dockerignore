@@ -1,0 +1,6 @@
+.git
+.github
+.dockerignore
+build.sh
+LICENSE
+*.md
