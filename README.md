@@ -17,10 +17,10 @@ GitHub Container Registry:
 
 | Tag | Contents |
 | --- | --- |
-| `ghcr.io/simonloebert/docker-guacamole:latest` | Guacamole + guacd + embedded MariaDB |
-| `ghcr.io/simonloebert/docker-guacamole:1.6.0` | Same, pinned to a Guacamole release |
-| `ghcr.io/simonloebert/docker-guacamole:latest-nomariadb` | Guacamole + guacd, bring your own database |
-| `ghcr.io/simonloebert/docker-guacamole:1.6.0-nomariadb` | Same, pinned to a Guacamole release |
+| `ghcr.io/bitsofentropy/docker-guacamole:latest` | Guacamole + guacd + embedded MariaDB |
+| `ghcr.io/bitsofentropy/docker-guacamole:1.6.0` | Same, pinned to a Guacamole release |
+| `ghcr.io/bitsofentropy/docker-guacamole:latest-nomariadb` | Guacamole + guacd, bring your own database |
+| `ghcr.io/bitsofentropy/docker-guacamole:1.6.0-nomariadb` | Same, pinned to a Guacamole release |
 
 Use the `-nomariadb` variant when the Guacamole database lives on an external
 MySQL/MariaDB, PostgreSQL or SQL Server instance, or when authentication is
@@ -37,7 +37,7 @@ docker run -d \
   -p 8080:8080 \
   -v /your-config-location:/config \
   -e OPT_MYSQL=Y \
-  ghcr.io/simonloebert/docker-guacamole:latest
+  ghcr.io/bitsofentropy/docker-guacamole:latest
 ```
 
 Browse to `http://your-host-ip:8080` and log in with user and password
@@ -115,7 +115,7 @@ yourself before starting the new image.
 ## Building
 
 ```
-git clone https://github.com/SimonLoebert/docker-guacamole.git
+git clone https://github.com/bitsofentropy/docker-guacamole.git
 cd docker-guacamole
 ./build.sh
 ```
